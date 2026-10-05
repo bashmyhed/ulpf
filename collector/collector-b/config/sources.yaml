@@ -1,0 +1,36 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ULPF Collector B — Sources
+# ──────────────────────────────────────────────────────────────────────────────
+# Component  : collector-b
+# File       : config/sources.yaml
+# Log Sources: NGINX JSON, AWS CloudTrail JSON, K8s Audit JSON,
+#              IoT Sensor JSON, PostgreSQL CSV
+# Description: File-based sources from two log directories.
+#              JSON files (.log/.json) and CSV files (.csv) are tailed separately
+#              so the downstream transform can distinguish format type by file ext.
+#
+# Log directory layout:
+#   /logs/json/  — nginx.log, cloudtrail.log, k8s_audit.log, iot.log (JSON)
+#   /logs/csv/   — postgres.csv (PostgreSQL csvlog)
+# ──────────────────────────────────────────────────────────────────────────────
+
+sources:
+
+  # NGINX access, CloudTrail, K8s Audit, IoT JSON files
+  json_files:
+    type: file
+    include:
+      - /logs/json/*.log
+      - /logs/json/*.json
+    read_from: beginning
+    ignore_checkpoints: true
+    file_key: file_path
+
+  # PostgreSQL CSV audit log (log_destination=csvlog)
+  csv_files:
+    type: file
+    include:
+      - /logs/csv/*.csv
+    read_from: beginning
+    ignore_checkpoints: true
+    file_key: file_path

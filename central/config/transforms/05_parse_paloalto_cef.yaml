@@ -1,0 +1,97 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ULPF Central Parser — OCSF Parser: Palo Alto CEF Firewall
+# ──────────────────────────────────────────────────────────────────────────────
+# Component  : central-parser
+# File       : config/transforms/05_parse_paloalto_cef.yaml
+# Log Format : Common Event Format (CEF:0) — PAN-OS TRAFFIC / THREAT logs
+# OCSF Class : Network Activity (class_uid: 4002, category_uid: 4)
+# Source Type: fw.paloalto
+# Input      : route_source_type.paloalto_cef
+# ──────────────────────────────────────────────────────────────────────────────
+
+transforms:
+  parse_paloalto_cef:
+    type: remap
+    inputs:
+      - route_source_type.paloalto_cef
+    source: |
+      raw_str   = to_string(.raw) ?? ""
+      parsed    = parse_cef(raw_str) ?? {}
+      ext       = object(parsed.extensions) ?? {}
+
+      src_ip    = to_string(ext.src) ?? ""
+      dst_ip    = to_string(ext.dst) ?? ""
+      src_port  = to_int(ext.spt) ?? 0
+      dst_port  = to_int(ext.dpt) ?? 0
+      proto_raw = to_string(ext.proto) ?? "UNKNOWN"
+      proto     = upcase(proto_raw)
+      bytes_in  = to_int(ext.bytes_in) ?? 0
+      bytes_out = to_int(ext.bytes_out) ?? 0
+      pname_raw = string(parsed.name) ?? "unknown"
+      act_str   = downcase(pname_raw)
+      sig_id    = string(parsed.signature_id) ?? ""
+
+      act_id  = if act_str == "allow" { 1 } else if act_str == "deny" || act_str == "drop" { 2 } else { 0 }
+      st_name = if act_id == 1 { "Success" } else if act_id == 2 { "Failure" } else { "Other" }
+      st_id   = if act_id == 1 { 1 } else if act_id == 2 { 2 } else { 99 }
+
+      src_obj   = object(.source) ?? {}
+      event_id  = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    4002,
+        "class_name":   "Network Activity",
+        "category_uid": 4,
+        "activity_id":  act_id,
+        "severity_id":  1,
+        "severity":     "Informational",
+        "status":       st_name,
+        "status_id":    st_id,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      "CEF: " + pname_raw + " " + src_ip + ":" + to_string(src_port) + " -> " + dst_ip + ":" + to_string(dst_port),
+        "src_endpoint": { "ip": src_ip, "port": src_port, "type_id": 1 },
+        "dst_endpoint": { "ip": dst_ip, "port": dst_port, "type_id": 1 },
+        "traffic": {
+          "bytes_in":  bytes_in,
+          "bytes_out": bytes_out,
+          "bytes":     bytes_in + bytes_out
+        },
+        "metadata": {
+          "uid":            event_id,
+          "version":        "1.3.0",
+          "product": {
+            "name":        to_string(src_obj.product) ?? "PAN-OS",
+            "vendor_name": to_string(src_obj.vendor) ?? "PaloAlto",
+            "version":     to_string(src_obj.product_version) ?? "unknown"
+          },
+          "log_provider":   "cef",
+          "log_name":       to_string(src_obj.type) ?? "fw.paloalto",
+          "event_code":     sig_id,
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "observables": [
+          { "name": "src_ip",   "type_id": 2, "value": src_ip },
+          { "name": "dst_ip",   "type_id": 2, "value": dst_ip },
+          { "name": "protocol", "type_id": 9, "value": proto }
+        ],
+        "unmapped": {
+          "site":         to_string(.site_name) ?? (if to_string(.site_id) == "kol-dc1" { "Site A" } else if to_string(.site_id) == "del-dc2" { "Site B" } else if to_string(.site_id) == "mum-dc3" { "Site C" } else { "Site A" }),
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "agent_id":     to_string(.agent_id) ?? to_string(.collector_id) ?? "unknown",
+          "collector_id": to_string(.agent_id) ?? to_string(.collector_id) ?? "unknown",
+          "raw_format":   "cef",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }

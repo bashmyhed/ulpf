@@ -1,0 +1,32 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ULPF Collector B — Sinks
+# ──────────────────────────────────────────────────────────────────────────────
+# Component  : collector-b
+# File       : config/sinks.yaml
+# Env vars   : KAFKA_BOOTSTRAP (default: kafka:9092)
+# ──────────────────────────────────────────────────────────────────────────────
+
+sinks:
+
+  # Primary: Kafka upstream to central parser
+  kafka_out:
+    type: kafka
+    inputs:
+      - envelope_b
+    bootstrap_servers: "${KAFKA_BOOTSTRAP}"
+    topic: "ulpf-raw-logs"
+    encoding:
+      codec: json
+    buffer:
+      type: memory
+      max_events: 1000
+      when_full: block
+
+  # Debug: local NDJSON mirror
+  local_debug:
+    type: file
+    inputs:
+      - envelope_b
+    path: /logs/debug/instance-b-sent.ndjson
+    encoding:
+      codec: json

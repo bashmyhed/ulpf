@@ -1,0 +1,1015 @@
+# Vector Central Parser — ULPF
+# OCSF 1.3  |  Slim envelope design (v2)
+#
+# Changes from v1:
+#   - metadata.integrity: single hash (collector original) + verified flag only
+#   - unmapped: flat, minimal — site_id, collector_id, raw_format, source_tz, kafka offset, source_path
+#   - Removed: unmapped.envelope, unmapped.raw_data, all duplicate fields
+#   - Raw log lives in MinIO only — linked via metadata.uid (ULID)
+
+sources:
+  kafka_in:
+    type: kafka
+    bootstrap_servers: "${KAFKA_BOOTSTRAP}"
+    group_id: "ulpf-central-parser"
+    topics:
+      - "ulpf-raw-logs"
+    decoding:
+      codec: json
+    auto_offset_reset: earliest
+    fetch_wait_max_ms: 100
+
+transforms:
+
+  # ── Step 1: Validation & Stamping ───────────────────────────────────────────
+  stamp_and_verify:
+    type: remap
+    inputs:
+      - kafka_in
+    source: |
+      raw_msg   = string!(.raw)
+      raw_hash  = string(.raw_sha256) ?? ""
+      coll_time = to_int(.collected_at) ?? to_unix_timestamp(now(), unit: "milliseconds")
+
+      computed_hash = sha2(raw_msg)
+      hash_ok       = (computed_hash == raw_hash)
+
+      actual_len   = length(raw_msg)
+      declared_len = to_int(.raw_len) ?? actual_len
+      len_ok       = (actual_len == declared_len)
+
+      ts_hex   = upcase(string!(format_int!(coll_time, 16)))
+      rnd_hex  = upcase(slice!(replace(uuid_v4(), "-", ""), 0, 10))
+      event_id = "01" + ts_hex + rnd_hex
+
+      .event_id    = event_id
+      .ingested_at = to_unix_timestamp(now(), unit: "milliseconds")
+
+      .integrity = {
+        "algorithm": "sha256",
+        "hash":      raw_hash,
+        "verified":  hash_ok && len_ok
+      }
+
+  # ── Step 2: Route by source.type ────────────────────────────────────────────
+  route_source_type:
+    type: route
+    inputs:
+      - stamp_and_verify
+    route:
+      cisco_asa:    '.source.type == "fw.cisco.asa"'
+      linux_auth:   '.source.type == "linux.auth"'
+      paloalto_cef: '.source.type == "fw.paloalto"'
+      qradar_leef:  '.source.type == "siem.qradar"'
+      nginx_access: '.source.type == "web.nginx.access"'
+      cloudtrail:   '.source.type == "cloud.aws.cloudtrail"'
+      k8s_audit:    '.source.type == "k8s.audit"'
+      iot_sensor:   '.source.type == "iot.sensor"'
+      postgres_db:  '.source.type == "db.postgres"'
+      windows_evtx: 'starts_with(string(.source.type) ?? "", "windows.")'
+
+  # ── OCSF: Cisco ASA Firewall → 4002 Network Activity ────────────────────────
+  parse_cisco_asa:
+    type: remap
+    inputs:
+      - route_source_type.cisco_asa
+    source: |
+      raw_str = to_string(.raw) ?? ""
+      parsed  = parse_regex(raw_str, r'^%ASA-(?P<sev>\d)-(?P<msg_id>\d+):\s+(?P<msg>.+)$') ?? {}
+      sev_num = to_int(parsed.sev) ?? 3
+      msg_id  = string(parsed.msg_id) ?? ""
+      msg_raw = string(parsed.msg) ?? raw_str
+      msg     = if msg_raw != "" { msg_raw } else { raw_str }
+
+      sev_id = if sev_num <= 2 { 5 } else if sev_num == 3 { 4 } else if sev_num == 4 { 3 } else if sev_num == 5 { 2 } else if sev_num == 6 { 1 } else { 0 }
+      sev_name = if sev_id == 5 { "Critical" } else if sev_id == 4 { "High" } else if sev_id == 3 { "Medium" } else if sev_id == 2 { "Low" } else { "Informational" }
+
+      ip_m   = parse_regex(msg, r'(?P<src>\d+\.\d+\.\d+\.\d+)[:/]?(?P<spt>\d+)?\s*-?(?:->)?\s*(?P<dst>\d+\.\d+\.\d+\.\d+)?') ?? {}
+      src_ip = string(ip_m.src) ?? ""
+      dst_ip = string(ip_m.dst) ?? ""
+      src_pt = to_int(ip_m.spt) ?? 0
+
+      msg_lo = downcase(msg)
+      act_id = if contains(msg_lo, "permitted") || contains(msg_lo, "allowed") { 1 } else if contains(msg_lo, "denied") || contains(msg_lo, "deny") { 2 } else { 0 }
+      st_name = if act_id == 1 { "Success" } else if act_id == 2 { "Failure" } else { "Other" }
+      st_id   = if act_id == 1 { 1 } else if act_id == 2 { 2 } else { 99 }
+
+      src_obj   = object(.source) ?? {}
+      event_id  = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    4002,
+        "class_name":   "Network Activity",
+        "category_uid": 4,
+        "activity_id":  act_id,
+        "severity_id":  sev_id,
+        "severity":     sev_name,
+        "status":       st_name,
+        "status_id":    st_id,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      msg,
+        "src_endpoint": { "ip": src_ip, "port": src_pt, "type_id": 1 },
+        "dst_endpoint": { "ip": dst_ip, "type_id": 1 },
+        "metadata": {
+          "uid":            event_id,
+          "version":        "1.3.0",
+          "product": {
+            "name":        to_string(src_obj.product) ?? "ASA",
+            "vendor_name": to_string(src_obj.vendor) ?? "Cisco",
+            "version":     to_string(src_obj.product_version) ?? "unknown"
+          },
+          "log_provider":   "syslog",
+          "log_name":       to_string(src_obj.type) ?? "fw.cisco.asa",
+          "event_code":     msg_id,
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "observables": [
+          { "name": "src_ip", "type_id": 2, "value": src_ip },
+          { "name": "dst_ip", "type_id": 2, "value": dst_ip }
+        ],
+        "unmapped": {
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "collector_id": to_string(.collector_id) ?? "unknown",
+          "raw_format":   to_string(.raw_format) ?? "syslog3164",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }
+
+  # ── OCSF: Linux Auth Syslog → 4001 Operating System Events ─────────────────
+  parse_linux_auth:
+    type: remap
+    inputs:
+      - route_source_type.linux_auth
+    source: |
+      raw_str  = to_string(.raw) ?? ""
+      parsed   = parse_syslog(raw_str) ?? {}
+      hn_raw   = string(parsed.hostname) ?? ""
+      hostname = if hn_raw != "" { hn_raw } else { to_string(.source.host_name) ?? "unknown" }
+      an_raw   = string(parsed.appname) ?? ""
+      appname  = if an_raw != "" { an_raw } else { "auth" }
+      msg_raw  = string(parsed.message) ?? ""
+      message  = if msg_raw != "" { msg_raw } else { raw_str }
+      sev_raw  = string(parsed.severity) ?? "info"
+      sev_str  = downcase(sev_raw)
+      pid_str  = string(parsed.procid) ?? ""
+
+      sev_id = if includes(["emerg","alert","crit","error","err"], sev_str) { 4 } else if sev_str == "warning" || sev_str == "warn" { 3 } else if sev_str == "notice" { 2 } else if sev_str == "info" { 1 } else { 0 }
+
+      src_obj   = object(.source) ?? {}
+      event_id  = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    4001,
+        "class_name":   "Operating System Events",
+        "category_uid": 4,
+        "activity_id":  1,
+        "severity_id":  sev_id,
+        "severity":     upcase(sev_str),
+        "status":       "Other",
+        "status_id":    99,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      message,
+        "src_endpoint": { "hostname": hostname, "type_id": 1 },
+        "metadata": {
+          "uid":            event_id,
+          "version":        "1.3.0",
+          "product": {
+            "name":        to_string(src_obj.product) ?? "Linux",
+            "vendor_name": to_string(src_obj.vendor) ?? "Linux",
+            "version":     to_string(src_obj.product_version) ?? "unknown"
+          },
+          "log_provider":   "syslog",
+          "log_name":       to_string(src_obj.type) ?? "linux.auth",
+          "event_code":     null,
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "observables": [
+          { "name": "hostname", "type_id": 1, "value": hostname },
+          { "name": "process",  "type_id": 7, "value": appname }
+        ],
+        "unmapped": {
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "collector_id": to_string(.collector_id) ?? "unknown",
+          "raw_format":   to_string(.raw_format) ?? "syslog3164",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "pid":          pid_str,
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }
+
+  # ── OCSF: Palo Alto CEF → 4002 Network Activity ─────────────────────────────
+  parse_paloalto_cef:
+    type: remap
+    inputs:
+      - route_source_type.paloalto_cef
+    source: |
+      raw_str   = to_string(.raw) ?? ""
+      parsed    = parse_cef(raw_str) ?? {}
+      ext       = object(parsed.extensions) ?? {}
+
+      src_ip    = to_string(ext.src) ?? ""
+      dst_ip    = to_string(ext.dst) ?? ""
+      src_port  = to_int(ext.spt) ?? 0
+      dst_port  = to_int(ext.dpt) ?? 0
+      proto_raw = to_string(ext.proto) ?? "UNKNOWN"
+      proto     = upcase(proto_raw)
+      bytes_in  = to_int(ext.bytes_in) ?? 0
+      bytes_out = to_int(ext.bytes_out) ?? 0
+      pname_raw = string(parsed.name) ?? "unknown"
+      act_str   = downcase(pname_raw)
+      sig_id    = string(parsed.signature_id) ?? ""
+
+      act_id  = if act_str == "allow" { 1 } else if act_str == "deny" || act_str == "drop" { 2 } else { 0 }
+      st_name = if act_id == 1 { "Success" } else if act_id == 2 { "Failure" } else { "Other" }
+      st_id   = if act_id == 1 { 1 } else if act_id == 2 { 2 } else { 99 }
+
+      src_obj   = object(.source) ?? {}
+      event_id  = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    4002,
+        "class_name":   "Network Activity",
+        "category_uid": 4,
+        "activity_id":  act_id,
+        "severity_id":  1,
+        "severity":     "Informational",
+        "status":       st_name,
+        "status_id":    st_id,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      "CEF: " + pname_raw + " " + src_ip + ":" + to_string(src_port) + " -> " + dst_ip + ":" + to_string(dst_port),
+        "src_endpoint": { "ip": src_ip, "port": src_port, "type_id": 1 },
+        "dst_endpoint": { "ip": dst_ip, "port": dst_port, "type_id": 1 },
+        "traffic": {
+          "bytes_in":  bytes_in,
+          "bytes_out": bytes_out,
+          "bytes":     bytes_in + bytes_out
+        },
+        "metadata": {
+          "uid":            event_id,
+          "version":        "1.3.0",
+          "product": {
+            "name":        to_string(src_obj.product) ?? "PAN-OS",
+            "vendor_name": to_string(src_obj.vendor) ?? "PaloAlto",
+            "version":     to_string(src_obj.product_version) ?? "unknown"
+          },
+          "log_provider":   "cef",
+          "log_name":       to_string(src_obj.type) ?? "fw.paloalto",
+          "event_code":     sig_id,
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "observables": [
+          { "name": "src_ip",   "type_id": 2, "value": src_ip },
+          { "name": "dst_ip",   "type_id": 2, "value": dst_ip },
+          { "name": "protocol", "type_id": 9, "value": proto }
+        ],
+        "unmapped": {
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "collector_id": to_string(.collector_id) ?? "unknown",
+          "raw_format":   "cef",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }
+
+  # ── OCSF: IBM QRadar LEEF → 4002 Network Activity ───────────────────────────
+  parse_qradar_leef:
+    type: remap
+    inputs:
+      - route_source_type.qradar_leef
+    source: |
+      raw_str  = to_string(.raw) ?? ""
+      parts    = split(raw_str, "|")
+      evtid    = string(parts[4]) ?? "unknown"
+      ext_str  = string(parts[5]) ?? ""
+      parsed   = parse_key_value(ext_str, key_value_delimiter: "=", field_delimiter: "\t") ?? {}
+
+      src_ip   = string(parsed.src) ?? ""
+      dst_ip   = string(parsed.dst) ?? ""
+      username = string(parsed.suser) ?? ""
+      msg_raw  = string(parsed.msg) ?? ""
+      msg      = if msg_raw != "" { msg_raw } else { "LEEF event " + evtid }
+      sev_raw  = string(parsed.severity) ?? "medium"
+      sev_str  = downcase(sev_raw)
+
+      sev_id = if sev_str == "critical" { 5 } else if sev_str == "high" { 4 } else if sev_str == "medium" { 3 } else if sev_str == "low" { 2 } else if sev_str == "info" { 1 } else { 3 }
+
+      src_obj   = object(.source) ?? {}
+      event_id  = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    4002,
+        "class_name":   "Network Activity",
+        "category_uid": 4,
+        "activity_id":  1,
+        "severity_id":  sev_id,
+        "severity":     upcase(sev_str),
+        "status":       "Other",
+        "status_id":    99,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      msg,
+        "src_endpoint": { "ip": src_ip, "type_id": 1 },
+        "dst_endpoint": { "ip": dst_ip, "type_id": 1 },
+        "actor": { "user": { "name": username } },
+        "metadata": {
+          "uid":            event_id,
+          "version":        "1.3.0",
+          "product": {
+            "name":        to_string(src_obj.product) ?? "QRadar",
+            "vendor_name": to_string(src_obj.vendor) ?? "IBM",
+            "version":     to_string(src_obj.product_version) ?? "unknown"
+          },
+          "log_provider":   "leef",
+          "log_name":       to_string(src_obj.type) ?? "siem.qradar",
+          "event_code":     evtid,
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "observables": [
+          { "name": "src_ip", "type_id": 2, "value": src_ip },
+          { "name": "dst_ip", "type_id": 2, "value": dst_ip }
+        ],
+        "unmapped": {
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "collector_id": to_string(.collector_id) ?? "unknown",
+          "raw_format":   "leef",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }
+
+  # ── OCSF: Nginx Web Access → 4002 Network Activity (HTTP) ───────────────────
+  parse_nginx_access:
+    type: remap
+    inputs:
+      - route_source_type.nginx_access
+    source: |
+      raw_str = to_string(.raw) ?? ""
+      parsed  = parse_json(raw_str) ?? {}
+      src_ip  = string(parsed.remote_addr) ?? ""
+      meth_raw = string(parsed.request_method) ?? "GET"
+      method  = if meth_raw != "" { meth_raw } else { "GET" }
+      path_raw = string(parsed.request_path) ?? "/"
+      path    = if path_raw != "" { path_raw } else { "/" }
+      status  = to_int(parsed.status) ?? 200
+      bytes_  = to_int(parsed.body_bytes_sent) ?? 0
+      ua      = string(parsed.http_user_agent) ?? ""
+
+      status_id = if status >= 200 && status < 300 { 1 } else if status >= 400 { 2 } else { 99 }
+      sev_id   = if status >= 500 { 4 } else if status >= 400 { 3 } else { 1 }
+      sev_name = if status >= 500 { "High" } else if status >= 400 { "Medium" } else { "Informational" }
+      st_str   = if status_id == 1 { "Success" } else { "Failure" }
+      act_id   = if method == "GET" { 1 } else if method == "POST" { 2 } else if method == "PUT" { 3 } else if method == "DELETE" { 4 } else { 0 }
+
+      src_obj   = object(.source) ?? {}
+      event_id  = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    4002,
+        "class_name":   "Network Activity",
+        "category_uid": 4,
+        "activity_id":  act_id,
+        "severity_id":  sev_id,
+        "severity":     sev_name,
+        "status":       st_str,
+        "status_id":    status_id,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      method + " " + path + " HTTP " + to_string(status),
+        "src_endpoint": { "ip": src_ip, "type_id": 1 },
+        "http_request": {
+          "http_method": method,
+          "url":         { "path": path },
+          "user_agent":  ua
+        },
+        "http_response": { "code": status },
+        "traffic": { "bytes_out": bytes_ },
+        "metadata": {
+          "uid":            event_id,
+          "version":        "1.3.0",
+          "product": {
+            "name":        to_string(src_obj.product) ?? "nginx",
+            "vendor_name": to_string(src_obj.vendor) ?? "nginx",
+            "version":     to_string(src_obj.product_version) ?? "unknown"
+          },
+          "log_provider":   "json",
+          "log_name":       to_string(src_obj.type) ?? "web.nginx.access",
+          "event_code":     to_string(status),
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "observables": [
+          { "name": "src_ip", "type_id": 2, "value": src_ip },
+          { "name": "url",    "type_id": 6, "value": path }
+        ],
+        "unmapped": {
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "collector_id": to_string(.collector_id) ?? "unknown",
+          "raw_format":   "json",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }
+
+  # ── OCSF: CloudTrail JSON → 6003 API Activity ────────────────────────────────
+  parse_cloudtrail:
+    type: remap
+    inputs:
+      - route_source_type.cloudtrail
+    source: |
+      raw_str  = to_string(.raw) ?? ""
+      parsed   = parse_json(raw_str) ?? {}
+      identity = object(parsed.userIdentity) ?? {}
+      un_raw   = to_string(identity.userName) ?? ""
+      idt_raw  = to_string(identity.type) ?? "unknown"
+      username = if un_raw != "" { un_raw } else { idt_raw }
+      src_ip   = string(parsed.sourceIPAddress) ?? ""
+      evt_src  = string(parsed.eventSource) ?? "aws"
+      evt_name = string(parsed.eventName) ?? "unknown"
+      region   = string(parsed.awsRegion) ?? "us-east-1"
+      err_code = string(parsed.errorCode) ?? ""
+      readonly = bool(parsed.readOnly) ?? false
+
+      act_id   = if readonly { 1 } else { 2 }
+      has_err  = err_code != ""
+      sev_id   = if has_err { 3 } else { 1 }
+      sev_name = if has_err { "Medium" } else { "Informational" }
+      st_name  = if has_err { "Failure" } else { "Success" }
+      st_id    = if has_err { 2 } else { 1 }
+
+      src_obj   = object(.source) ?? {}
+      event_id  = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    6003,
+        "class_name":   "API Activity",
+        "category_uid": 6,
+        "activity_id":  act_id,
+        "severity_id":  sev_id,
+        "severity":     sev_name,
+        "status":       st_name,
+        "status_id":    st_id,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      evt_name + " on " + evt_src + " by " + username,
+        "src_endpoint": { "ip": src_ip, "type_id": 1 },
+        "actor": { "user": { "name": username, "type": idt_raw } },
+        "api": {
+          "operation": evt_name,
+          "service":   { "name": evt_src }
+        },
+        "cloud": { "provider": "aws", "region": region },
+        "metadata": {
+          "uid":            event_id,
+          "version":        "1.3.0",
+          "product": {
+            "name":        to_string(src_obj.product) ?? "CloudTrail",
+            "vendor_name": to_string(src_obj.vendor) ?? "Amazon",
+            "version":     to_string(src_obj.product_version) ?? "unknown"
+          },
+          "log_provider":   "cloudtrail",
+          "log_name":       to_string(src_obj.type) ?? "cloud.aws.cloudtrail",
+          "event_code":     evt_name,
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "observables": [
+          { "name": "src_ip",   "type_id": 2, "value": src_ip },
+          { "name": "username", "type_id": 4, "value": username }
+        ],
+        "unmapped": {
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "collector_id": to_string(.collector_id) ?? "unknown",
+          "raw_format":   "json",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }
+
+  # ── OCSF: K8s Audit JSON → 6003 API Activity ─────────────────────────────────
+  parse_k8s_audit:
+    type: remap
+    inputs:
+      - route_source_type.k8s_audit
+    source: |
+      raw_str   = to_string(.raw) ?? ""
+      parsed    = parse_json(raw_str) ?? {}
+      user_obj  = object(parsed.user) ?? {}
+      username  = to_string(user_obj.username) ?? "unknown"
+      verb      = string(parsed.verb) ?? "unknown"
+      obj_ref   = object(parsed.objectRef) ?? {}
+      resource  = to_string(obj_ref.resource) ?? ""
+      namespace = to_string(obj_ref.namespace) ?? ""
+      src_ips   = array(parsed.sourceIPs) ?? []
+      src_ip    = to_string(src_ips[0]) ?? ""
+      resp_st   = object(parsed.responseStatus) ?? {}
+      code      = to_int(resp_st.code) ?? 200
+      audit_id  = string(parsed.auditID) ?? ""
+      res_label = if resource != "" { resource } else { "k8s" }
+
+      sev_id   = if code >= 400 { 3 } else { 1 }
+      sev_name = if code >= 400 { "Medium" } else { "Informational" }
+      st_name  = if code >= 400 { "Failure" } else { "Success" }
+      st_id    = if code >= 400 { 2 } else { 1 }
+
+      src_obj   = object(.source) ?? {}
+      event_id  = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    6003,
+        "class_name":   "API Activity",
+        "category_uid": 6,
+        "activity_id":  1,
+        "severity_id":  sev_id,
+        "severity":     sev_name,
+        "status":       st_name,
+        "status_id":    st_id,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      username + " " + verb + " " + res_label,
+        "src_endpoint": { "ip": src_ip, "type_id": 1 },
+        "actor":        { "user": { "name": username } },
+        "api": {
+          "operation": verb,
+          "service":   { "name": "kubernetes" },
+          "group":     { "name": namespace }
+        },
+        "metadata": {
+          "uid":            event_id,
+          "version":        "1.3.0",
+          "product": {
+            "name":        to_string(src_obj.product) ?? "Kubernetes",
+            "vendor_name": to_string(src_obj.vendor) ?? "CNCF",
+            "version":     to_string(src_obj.product_version) ?? "unknown"
+          },
+          "log_provider":   "k8s_audit",
+          "log_name":       to_string(src_obj.type) ?? "k8s.audit",
+          "event_code":     audit_id,
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "observables": [
+          { "name": "src_ip",   "type_id": 2, "value": src_ip },
+          { "name": "username", "type_id": 4, "value": username }
+        ],
+        "unmapped": {
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "collector_id": to_string(.collector_id) ?? "unknown",
+          "raw_format":   "json",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }
+
+  # ── OCSF: IoT Telemetry → 2001 Device Activity ───────────────────────────────
+  parse_iot_sensor:
+    type: remap
+    inputs:
+      - route_source_type.iot_sensor
+    source: |
+      raw_str     = to_string(.raw) ?? ""
+      parsed      = parse_json(raw_str) ?? {}
+      device_id   = string(parsed.device_id) ?? "unknown"
+      sensor_type = string(parsed.sensor_type) ?? "unknown"
+      value       = to_float(parsed.value) ?? 0.0
+      unit        = string(parsed.unit) ?? ""
+      stat_raw    = string(parsed.status) ?? "ok"
+      dev_status  = downcase(stat_raw)
+
+      sev_id   = if dev_status == "error" { 4 } else if dev_status == "warning" { 3 } else { 1 }
+      sev_name = if dev_status == "error" { "High" } else if dev_status == "warning" { "Medium" } else { "Informational" }
+      st_name  = if dev_status == "ok" { "Success" } else { "Failure" }
+      st_id    = if dev_status == "ok" { 1 } else { 2 }
+
+      src_obj   = object(.source) ?? {}
+      event_id  = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    2001,
+        "class_name":   "Device Activity",
+        "category_uid": 2,
+        "activity_id":  1,
+        "severity_id":  sev_id,
+        "severity":     sev_name,
+        "status":       st_name,
+        "status_id":    st_id,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      device_id + " " + sensor_type + "=" + to_string(value) + unit + " [" + dev_status + "]",
+        "device": {
+          "uid":     device_id,
+          "type_id": 17,
+          "type":    "IoT Device"
+        },
+        "metadata": {
+          "uid":            event_id,
+          "version":        "1.3.0",
+          "product": {
+            "name":        to_string(src_obj.product) ?? "IoT",
+            "vendor_name": to_string(src_obj.vendor) ?? "unknown",
+            "version":     to_string(src_obj.product_version) ?? "unknown"
+          },
+          "log_provider":   "iot",
+          "log_name":       to_string(src_obj.type) ?? "iot.sensor",
+          "event_code":     null,
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "observables": [
+          { "name": "device_id", "type_id": 1, "value": device_id }
+        ],
+        "unmapped": {
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "collector_id": to_string(.collector_id) ?? "unknown",
+          "raw_format":   "json",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }
+
+  # ── OCSF: PostgreSQL CSV → 4003 Database Activity ────────────────────────────
+  parse_postgres_db:
+    type: remap
+    inputs:
+      - route_source_type.postgres_db
+    source: |
+      raw_str     = to_string(.raw) ?? ""
+      rows        = parse_csv(raw_str) ?? []
+      row         = rows[0]
+      pid         = string(row[1]) ?? ""
+      db_user     = string(row[2]) ?? ""
+      database    = string(row[3]) ?? ""
+      duration_ms = int(row[4]) ?? 0
+      sev_raw     = string(row[5]) ?? "log"
+      sev_str     = downcase(sev_raw)
+      query       = string(row[6]) ?? ""
+
+      sev_id  = if sev_str == "error" { 4 } else { 1 }
+      st_name = if sev_str == "error" { "Failure" } else { "Success" }
+      st_id   = if sev_str == "error" { 2 } else { 1 }
+
+      src_obj   = object(.source) ?? {}
+      event_id  = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    4003,
+        "class_name":   "Database Activity",
+        "category_uid": 4,
+        "activity_id":  1,
+        "severity_id":  sev_id,
+        "severity":     upcase(sev_str),
+        "status":       st_name,
+        "status_id":    st_id,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      "PostgreSQL: " + upcase(sev_str) + " pid=" + pid + " db=" + database,
+        "database": {
+          "name":    database,
+          "type_id": 3,
+          "type":    "PostgreSQL"
+        },
+        "actor": { "user": { "name": db_user } },
+        "query": { "text": query },
+        "metadata": {
+          "uid":            event_id,
+          "version":        "1.3.0",
+          "product": {
+            "name":        to_string(src_obj.product) ?? "PostgreSQL",
+            "vendor_name": to_string(src_obj.vendor) ?? "PostgreSQL",
+            "version":     to_string(src_obj.product_version) ?? "unknown"
+          },
+          "log_provider":   "csv",
+          "log_name":       to_string(src_obj.type) ?? "db.postgres",
+          "event_code":     null,
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "unmapped": {
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "collector_id": to_string(.collector_id) ?? "unknown",
+          "raw_format":   "csv",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "duration_ms":  duration_ms,
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }
+
+  # ── OCSF: Windows EVTX XML → 4801 Audit Activity ─────────────────────────────
+  parse_windows_evtx:
+    type: remap
+    inputs:
+      - route_source_type.windows_evtx
+    source: |
+      raw_str = to_string(.raw) ?? ""
+      parsed  = parse_xml(raw_str) ?? {}
+      event   = object(parsed.Event) ?? {}
+      sys     = object(event.System) ?? {}
+      evtdata = object(event.EventData) ?? {}
+
+      event_id_raw = sys.EventID
+      event_code   = if is_object(event_id_raw) {
+        to_string(get(event_id_raw, ["#text"]) ?? values(event_id_raw)[0] ?? "") ?? ""
+      } else {
+        to_string(event_id_raw) ?? ""
+      }
+
+      computer = to_string(sys.Computer) ?? to_string(.source.host_name) ?? "unknown"
+
+      msg_field = evtdata.Message
+      fallback  = "Windows Event " + event_code
+      msg = if is_object(msg_field) {
+        to_string(get(msg_field, ["#text"]) ?? values(msg_field)[0] ?? fallback) ?? fallback
+      } else if msg_field != null {
+        to_string(msg_field) ?? fallback
+      } else {
+        fallback
+      }
+
+      src_obj   = object(.source) ?? {}
+      uid       = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    4801,
+        "class_name":   "Audit Activity",
+        "category_uid": 4,
+        "activity_id":  1,
+        "severity_id":  1,
+        "severity":     "Informational",
+        "status":       "Other",
+        "status_id":    99,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      msg,
+        "src_endpoint": { "hostname": computer, "type_id": 1 },
+        "metadata": {
+          "uid":            uid,
+          "version":        "1.3.0",
+          "product": {
+            "name":        to_string(src_obj.product) ?? "Security-Auditing",
+            "vendor_name": to_string(src_obj.vendor) ?? "Microsoft",
+            "version":     to_string(src_obj.product_version) ?? "unknown"
+          },
+          "log_provider":   "xml",
+          "log_name":       to_string(src_obj.type) ?? "windows.security",
+          "event_code":     event_code,
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "observables": [
+          { "name": "hostname",   "type_id": 1, "value": computer },
+          { "name": "event_code", "type_id": 9, "value": event_code }
+        ],
+        "unmapped": {
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "collector_id": to_string(.collector_id) ?? "unknown",
+          "raw_format":   "evtx_xml",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }
+
+  # ── OCSF: Unknown fallback ────────────────────────────────────────────────────
+  parse_unknown:
+    type: remap
+    inputs:
+      - route_source_type._unmatched
+    source: |
+      raw_str   = string!(.raw)
+      src_obj   = object(.source) ?? {}
+      uid       = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    0,
+        "class_name":   "Unknown",
+        "category_uid": 0,
+        "activity_id":  0,
+        "severity_id":  0,
+        "severity":     "Unknown",
+        "status":       "Other",
+        "status_id":    99,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      truncate(raw_str, 200),
+        "metadata": {
+          "uid":            uid,
+          "version":        "1.3.0",
+          "product":        { "name": "unknown", "vendor_name": "unknown", "version": "unknown" },
+          "log_provider":   "unknown",
+          "log_name":       to_string(src_obj.type) ?? "unknown",
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "unmapped": {
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "collector_id": to_string(.collector_id) ?? "unknown",
+          "raw_format":   to_string(.raw_format) ?? "unknown",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }
+
+# ── Sinks ──────────────────────────────────────────────────────────────────────
+sinks:
+
+  # ── 1. MinIO Raw Data Lake (full envelope + raw, gzip, sitewise partitions) ──
+  minio_raw_lake:
+    type: aws_s3
+    inputs:
+      - stamp_and_verify
+    bucket: "${MINIO_BUCKET:-ulpf-data-lake}"
+    endpoint: "${MINIO_ENDPOINT:-http://minio:9000}"
+    region: "us-east-1"
+    key_prefix: "raw-preservation/site={{ site_id }}/source_type={{ source.type }}/date=%Y-%m-%d/"
+    filename_extension: "ndjson.gz"
+    auth:
+      access_key_id: "${MINIO_ROOT_USER:-minioadmin}"
+      secret_access_key: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+    encoding:
+      codec: json
+    compression: gzip
+    batch:
+      timeout_secs: 5
+    buffer:
+      type: memory
+      max_events: 500
+      when_full: block
+
+  # Local mirror of raw preservation (uncompressed for easy inspection)
+  local_raw_lake:
+    type: file
+    inputs:
+      - stamp_and_verify
+    path: "/output/raw-lake/preservation-events.ndjson"
+    encoding:
+      codec: json
+
+  # ── 2. OCSF Normalized Event Stream (slim, no raw logs) ──────────────────────
+  ocsf_all:
+    type: file
+    inputs:
+      - parse_cisco_asa
+      - parse_linux_auth
+      - parse_paloalto_cef
+      - parse_qradar_leef
+      - parse_nginx_access
+      - parse_cloudtrail
+      - parse_k8s_audit
+      - parse_iot_sensor
+      - parse_postgres_db
+      - parse_windows_evtx
+      - parse_unknown
+    path: "/output/ocsf-events.ndjson"
+    encoding:
+      codec: json
+
+  # ── 3. Console (live debug) ───────────────────────────────────────────────────
+  console_out:
+    type: console
+    inputs:
+      - parse_cisco_asa
+      - parse_linux_auth
+      - parse_paloalto_cef
+      - parse_qradar_leef
+      - parse_nginx_access
+      - parse_cloudtrail
+      - parse_k8s_audit
+      - parse_iot_sensor
+      - parse_postgres_db
+      - parse_windows_evtx
+      - parse_unknown
+    encoding:
+      codec: json
+
+  # ── 4. OpenSearch SIEM Analytics & Visualization ─────────────────────────────
+  opensearch_sink:
+    type: elasticsearch
+    inputs:
+      - parse_cisco_asa
+      - parse_linux_auth
+      - parse_paloalto_cef
+      - parse_qradar_leef
+      - parse_nginx_access
+      - parse_cloudtrail
+      - parse_k8s_audit
+      - parse_iot_sensor
+      - parse_postgres_db
+      - parse_windows_evtx
+      - parse_unknown
+    endpoints:
+      - "${OPENSEARCH_ENDPOINT:-http://opensearch:9200}"
+    api_version: "v8"
+    mode: "bulk"
+    bulk:
+      index: "ulpf-ocsf-%Y.%m.%d"
+    healthcheck:
+      enabled: false
+    buffer:
+      type: memory
+      max_events: 500
+      when_full: block

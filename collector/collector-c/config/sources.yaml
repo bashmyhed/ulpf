@@ -1,0 +1,27 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ULPF Collector C — Sources
+# ──────────────────────────────────────────────────────────────────────────────
+# Component  : collector-c
+# File       : config/sources.yaml
+# Log Sources: Windows Event Log (EVTX rendered XML)
+#              — Security-Auditing, Sysmon, PowerShell Operational
+# Description: Tails Windows EVTX XML log files. Each XML block is a single
+#              Windows Event record rendered from the EVTX binary format.
+#
+# Log directory layout:
+#   /logs/syslog/windows_events.log — XML events forwarded via syslog
+#   /logs/xml/                      — Directly mounted XML event files
+# ──────────────────────────────────────────────────────────────────────────────
+
+sources:
+
+  # Windows Event XML (rendered EVTX) — syslog forwarded and direct XML mounts
+  xml_files:
+    type: file
+    include:
+      - /logs/syslog/windows_events.log
+      - /logs/xml/*.log
+      - /logs/xml/*.xml
+    read_from: beginning
+    ignore_checkpoints: true
+    file_key: file_path

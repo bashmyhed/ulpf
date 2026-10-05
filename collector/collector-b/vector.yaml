@@ -1,0 +1,206 @@
+# Vector Collector — Instance B
+# Conforms to ULPF Collector Metadata Guide (v1)
+# Sources: Nginx JSON, CloudTrail JSON, K8s Audit JSON, IoT JSON, PostgreSQL CSV
+
+api:
+  enabled: true
+  address: "0.0.0.0:8686"
+  playground: false
+
+sources:
+  host_sys:
+    type: host_metrics
+    scrape_interval_secs: 15
+
+  internal_metrics:
+    type: internal_metrics
+
+  json_files:
+    type: file
+    include:
+      - /logs/json/*.log
+      - /logs/json/*.json
+    read_from: beginning
+    ignore_checkpoints: true
+    file_key: file_path
+
+  csv_files:
+    type: file
+    include:
+      - /logs/csv/*.csv
+    read_from: beginning
+    ignore_checkpoints: true
+    file_key: file_path
+
+transforms:
+  envelope_b:
+    type: remap
+    inputs:
+      - json_files
+      - csv_files
+    source: |
+      # ── 1. Validate payload ────────────────────────────────────────────────
+      raw_msg = string!(.message)
+      if length(raw_msg) == 0 { abort }
+
+      # Skip CSV header rows
+      if starts_with(raw_msg, "timestamp,") { abort }
+
+      # ── 2. Compute raw metrics ─────────────────────────────────────────────
+      raw_sha256 = sha2(raw_msg)
+      raw_len    = length(raw_msg)
+      coll_time  = to_unix_timestamp(now(), unit: "milliseconds")
+      site_id    = get_env_var("SITE_ID") ?? "del-dc2"
+      site_name  = "Site B"
+      agent_id   = get_env_var("AGENT_ID") ?? get_env_var("COLLECTOR_ID") ?? "agent-b"
+      fpath      = string(.file_path) ?? "/logs/unknown.log"
+
+      # ── 3. Classification conforming to metadataGuide Section 4 & 5 ────────
+      src_type   = "unknown.app"
+      vendor     = "Generic"
+      product    = "Unknown"
+      raw_format = "plain"
+      extra_src  = {}
+
+      # JSON format inspection
+      if starts_with(raw_msg, "{") || starts_with(raw_msg, "[") {
+        raw_format = "json"
+
+        # K8s Audit (metadataGuide Section 4.13)
+        if contains(raw_msg, "\"apiVersion\"") && contains(raw_msg, "audit.k8s.io") {
+          src_type = "k8s.audit"
+          vendor   = "CNCF"
+          product  = "Kubernetes"
+          extra_src = { "k8s": { "cluster": "k8s-prod-01" } }
+
+        # CloudTrail (metadataGuide Section 4.17)
+        } else if contains(raw_msg, "\"eventSource\"") && contains(raw_msg, "amazonaws.com") {
+          src_type = "cloud.aws.cloudtrail"
+          vendor   = "AWS"
+          product  = "CloudTrail"
+          extra_src = { "cloud": { "provider": "aws", "region": "us-east-1" } }
+
+        # Nginx Web Access (metadataGuide Section 4.10)
+        } else if contains(raw_msg, "\"remote_addr\"") && contains(raw_msg, "\"request_method\"") {
+          src_type = "web.nginx.access"
+          vendor   = "F5"
+          product  = "nginx"
+          extra_src = { "web": { "log_format_name": "json" } }
+
+        # IoT Sensor Telemetry (metadataGuide Section 4.18)
+        } else if contains(raw_msg, "\"device_id\"") && contains(raw_msg, "\"sensor_type\"") {
+          src_type = "iot.sensor"
+          vendor   = "Generic"
+          product  = "SensorGateway"
+          extra_src = { "iot": { "protocol": "http" } }
+
+        # Generic JSON fallback
+        } else {
+          src_type = "app.json"
+          vendor   = "Generic"
+          product  = "App"
+        }
+
+      # PostgreSQL CSV (metadataGuide Section 4.11)
+      } else if contains(raw_msg, ",") {
+        src_type   = "db.postgres"
+        vendor     = "PostgreSQL"
+        product    = "PostgreSQL"
+        raw_format = "csv"
+        extra_src  = { "db": { "engine": "postgresql", "audit_mechanism": "csv" } }
+      }
+
+      # ── 4. Build ULPF Envelope (metadataGuide Section 2 & 3) ───────────────
+      . = {
+        "envelope_version": 1,
+        "site_id": site_id,
+        "site_name": site_name,
+        "agent_id": agent_id,
+        "collector_id": agent_id,
+        "agent_version": "1.0.0",
+        "collector_version": "1.0.0",
+        "seq": coll_time,
+        "collected_at": coll_time,
+        "source_tz": "+05:30",
+        "clock": {
+          "synced": true,
+          "skew_ms": 0
+        },
+        "source": {
+          "type": src_type,
+          "vendor": vendor,
+          "product": product,
+          "product_version": "unknown",
+          "transport": "file",
+          "host_name": get_hostname() ?? agent_id,
+          "host_ip": null,
+          "sender_ip": null,
+          "sender_port": null,
+          "host_id": null,
+          "position": {
+            "path": fpath,
+            "inode": null,
+            "offset": null,
+            "line_no": null
+          }
+        },
+        "raw_format": raw_format,
+        "raw_encoding": "utf-8",
+        "raw_len": raw_len,
+        "raw_sha256": raw_sha256,
+        "raw": raw_msg,
+        "flags": {
+          "truncated": false,
+          "multiline_joined": false,
+          "decoded_from": null,
+          "redacted": false,
+          "duplicate_suspect": false
+        },
+        "labels": {
+          "env": get_env_var("INSTANCE_ENV") ?? "prod",
+          "site": "Site B",
+          "tier": "agent-b"
+        }
+      }
+
+      # Merge any source-specific metadata into source
+      if is_object(extra_src.k8s) {
+        .source.k8s = extra_src.k8s
+      } else if is_object(extra_src.cloud) {
+        .source.cloud = extra_src.cloud
+      } else if is_object(extra_src.web) {
+        .source.web = extra_src.web
+      } else if is_object(extra_src.iot) {
+        .source.iot = extra_src.iot
+      } else if is_object(extra_src.db) {
+        .source.db = extra_src.db
+      }
+
+sinks:
+  kafka_out:
+    type: kafka
+    inputs:
+      - envelope_b
+    bootstrap_servers: "${KAFKA_BOOTSTRAP}"
+    topic: "ulpf-raw-logs"
+    encoding:
+      codec: json
+    buffer:
+      type: memory
+      max_events: 1000
+      when_full: block
+
+  local_debug:
+    type: file
+    inputs:
+      - envelope_b
+    path: /logs/debug/instance-b-sent.ndjson
+    encoding:
+      codec: json
+
+  prometheus_metrics:
+    type: prometheus_exporter
+    inputs:
+      - host_sys
+      - internal_metrics
+    address: "0.0.0.0:9598"

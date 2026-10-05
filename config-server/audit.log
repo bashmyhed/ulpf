@@ -1,0 +1,89 @@
+Initializing new Git config repository at /tmp/test_ulpf_git
+Initializing new Git config repository at /tmp/ulpf_test_cfg_x2yim631/repo
+EVENT=AUTH_FAILURE | STATUS=WARN | IP=127.0.0.1
+EVENT=AUTH_FAILURE | STATUS=WARN | IP=127.0.0.1
+EVENT=CONFIG_VALIDATE_TEST | STATUS=PASS | IP=127.0.0.1 | INSTANCE=collector-test | DURATION=21.8ms
+EVENT=CONFIG_VALIDATE_TEST | STATUS=FAIL | IP=127.0.0.1 | INSTANCE=collector-test | DURATION=18.6ms
+EVENT=VALIDATION_PASSED | STATUS=PASS | IP=127.0.0.1 | INSTANCE=collector-alpha | DURATION=22.0ms
+EVENT=DEPLOY_SUCCESS | STATUS=SUCCESS | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=c451604b | DURATION=22.0ms | MSG=Deploy initial valid syslog topology
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=c451604b
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=c451604b
+EVENT=VALIDATION_PASSED | STATUS=PASS | IP=127.0.0.1 | INSTANCE=collector-beta | DURATION=18.5ms
+EVENT=DEPLOY_SUCCESS | STATUS=SUCCESS | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=a50f6676 | DURATION=18.5ms | MSG=Deploy configuration update via HTTP API
+EVENT=VALIDATION_PASSED | STATUS=PASS | IP=127.0.0.1 | INSTANCE=collector-beta | DURATION=20.6ms
+EVENT=DEPLOY_SUCCESS | STATUS=SUCCESS | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=1a80218d | DURATION=20.6ms | MSG=Deploy configuration update via HTTP API
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=1a80218d
+EVENT=ROLLBACK_SUCCESS | STATUS=SUCCESS | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=6a4e2cfb
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=6a4e2cfb
+Initializing new Git config repository at /tmp/ulpf_test_cfg_0tvt1jid/repo
+EVENT=AUTH_FAILURE | STATUS=WARN | IP=127.0.0.1
+EVENT=AUTH_FAILURE | STATUS=WARN | IP=127.0.0.1
+EVENT=CONFIG_VALIDATE_TEST | STATUS=PASS | IP=127.0.0.1 | INSTANCE=collector-test | DURATION=21.8ms
+EVENT=CONFIG_VALIDATE_TEST | STATUS=FAIL | IP=127.0.0.1 | INSTANCE=collector-test | DURATION=21.1ms
+EVENT=VALIDATION_PASSED | STATUS=PASS | IP=127.0.0.1 | INSTANCE=collector-alpha | DURATION=22.1ms
+EVENT=DEPLOY_SUCCESS | STATUS=SUCCESS | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=82b8fdea | DURATION=22.1ms | MSG=Deploy initial valid syslog topology
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=82b8fdea
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=82b8fdea
+EVENT=VALIDATION_FAILED | STATUS=FAIL | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=82b8fdea | DURATION=19.0ms | MSG=vector validate failed; existing active config preserved untouched
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=82b8fdea
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=82b8fdea
+EVENT=VALIDATION_PASSED | STATUS=PASS | IP=127.0.0.1 | INSTANCE=collector-beta | DURATION=20.4ms
+EVENT=DEPLOY_SUCCESS | STATUS=SUCCESS | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=5dba5238 | DURATION=20.4ms | MSG=Deploy configuration update via HTTP API
+EVENT=VALIDATION_PASSED | STATUS=PASS | IP=127.0.0.1 | INSTANCE=collector-beta | DURATION=19.4ms
+EVENT=DEPLOY_SUCCESS | STATUS=SUCCESS | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=9571acda | DURATION=19.4ms | MSG=Deploy configuration update via HTTP API
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=9571acda
+EVENT=ROLLBACK_SUCCESS | STATUS=SUCCESS | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=4e62be8e
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=4e62be8e
+Initializing new Git config repository at /tmp/ulpf_test_cfg_pwqj_bt4/repo
+EVENT=AUTH_FAILURE | STATUS=WARN | IP=127.0.0.1
+EVENT=AUTH_FAILURE | STATUS=WARN | IP=127.0.0.1
+EVENT=CONFIG_VALIDATE_TEST | STATUS=PASS | IP=127.0.0.1 | INSTANCE=collector-test | DURATION=107.3ms
+EVENT=CONFIG_VALIDATE_TEST | STATUS=FAIL | IP=127.0.0.1 | INSTANCE=collector-test | DURATION=15.8ms
+EVENT=VALIDATION_PASSED | STATUS=PASS | IP=127.0.0.1 | INSTANCE=collector-alpha | DURATION=10.6ms
+EVENT=DEPLOY_SUCCESS | STATUS=SUCCESS | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=735c3f79 | DURATION=10.6ms | MSG=Deploy initial valid syslog topology
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=735c3f79
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=735c3f79
+EVENT=VALIDATION_FAILED | STATUS=FAIL | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=735c3f79 | DURATION=11.5ms | MSG=vector validate failed; existing active config preserved untouched
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=735c3f79
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-alpha | COMMIT=735c3f79
+EVENT=VALIDATION_PASSED | STATUS=PASS | IP=127.0.0.1 | INSTANCE=collector-beta | DURATION=12.8ms
+EVENT=DEPLOY_SUCCESS | STATUS=SUCCESS | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=09fc84c5 | DURATION=12.8ms | MSG=Deploy configuration update via HTTP API
+EVENT=VALIDATION_PASSED | STATUS=PASS | IP=127.0.0.1 | INSTANCE=collector-beta | DURATION=12.0ms
+EVENT=DEPLOY_SUCCESS | STATUS=SUCCESS | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=dd134c2d | DURATION=12.0ms | MSG=Deploy configuration update via HTTP API
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=dd134c2d
+EVENT=ROLLBACK_SUCCESS | STATUS=SUCCESS | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=f5e0447b
+EVENT=CONFIG_FETCH | STATUS=INFO | IP=127.0.0.1 | INSTANCE=collector-beta | COMMIT=f5e0447b
+Initializing new Git config repository at /home/paul/projects/sih2/config-server/repo
+ULPF Vector Config Server listening on http://0.0.0.0:8888
+Git Repository Path: /home/paul/projects/sih2/config-server/repo
+Vector Binary: /home/paul/projects/sih2/test-suite/bin/bin/vector
+Security: Bearer token authentication ENABLED (Token: ulpf-s...2026)
+EVENT=CONFIG_VALIDATE_TEST | STATUS=FAIL | IP=127.0.0.1 | INSTANCE=collector-b | DURATION=808.2ms
+ULPF Vector Config Server listening on http://0.0.0.0:8888
+Git Repository Path: /home/paul/projects/sih2/config-server/repo
+Vector Binary: /home/paul/projects/sih2/test-suite/bin/bin/vector
+Security: Bearer token authentication ENABLED (Token: ulpf-s...2026)
+EVENT=AUTH_FAILURE | STATUS=WARN | IP=127.0.0.1
+ULPF Vector Config Server listening on http://0.0.0.0:8888
+Git Repository Path: /home/paul/projects/sih2/config-server/repo
+Vector Binary: /home/paul/projects/sih2/test-suite/bin/bin/vector
+Security: Bearer token authentication ENABLED (Token: ulpf-s...2026)
+EVENT=AUTH_FAILURE | STATUS=WARN | IP=127.0.0.1
+ULPF Vector Config Server listening on http://0.0.0.0:8888
+Git Repository Path: /home/paul/projects/sih2/config-server/repo
+Vector Binary: /home/paul/projects/sih2/test-suite/bin/bin/vector
+Security: Bearer token authentication ENABLED (Token: ulpf-s...2026)
+ULPF Vector Config Server listening on http://0.0.0.0:8888
+Git Repository Path: /home/paul/projects/sih2/config-server/repo
+Vector Binary: /home/paul/projects/sih2/test-suite/bin/bin/vector
+Security: Bearer token authentication ENABLED (Token: ulpf-s...2026)
+EVENT=AUTH_FAILURE | STATUS=WARN | IP=127.0.0.1
+ULPF Vector Config Server listening on http://0.0.0.0:8888
+Git Repository Path: /home/paul/projects/sih2/config-server/repo
+Vector Binary: /home/paul/projects/sih2/test-suite/bin/bin/vector
+Security: Bearer token authentication ENABLED (Token: ulpf-s...2026)
+ULPF Vector Config Server listening on http://0.0.0.0:8888
+Git Repository Path: /home/paul/projects/sih2/config-server/repo
+Vector Binary: /home/paul/projects/sih2/test-suite/bin/bin/vector
+Security: Bearer token authentication ENABLED (Token: ulpf-s...2026)
+EVENT=AUTH_FAILURE | STATUS=WARN | IP=127.0.0.1

@@ -1,0 +1,39 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ULPF Central Parser — Transform: Source-Type Router
+# ──────────────────────────────────────────────────────────────────────────────
+# Component  : central-parser
+# File       : config/transforms/02_route.yaml
+# Description: Step 2. Routes verified events to the appropriate format-specific
+#              OCSF parser based on the source.type field set by the edge collector.
+#
+# Route Keys → Downstream Parser (file):
+#   cisco_asa    → 03_parse_cisco_asa.yaml     (fw.cisco.asa)
+#   linux_auth   → 04_parse_linux_auth.yaml    (linux.auth)
+#   paloalto_cef → 05_parse_paloalto_cef.yaml  (fw.paloalto)
+#   qradar_leef  → 06_parse_qradar_leef.yaml   (siem.qradar)
+#   nginx_access → 07_parse_nginx_access.yaml  (web.nginx.access)
+#   cloudtrail   → 08_parse_cloudtrail.yaml    (cloud.aws.cloudtrail)
+#   k8s_audit    → 09_parse_k8s_audit.yaml     (k8s.audit)
+#   iot_sensor   → 10_parse_iot_sensor.yaml    (iot.sensor)
+#   postgres_db  → 11_parse_postgres_db.yaml   (db.postgres)
+#   windows_evtx → 12_parse_windows_evtx.yaml  (windows.*)
+#   _unmatched   → 13_parse_unknown.yaml       (fallback)
+# Input      : stamp_and_verify
+# ──────────────────────────────────────────────────────────────────────────────
+
+transforms:
+  route_source_type:
+    type: route
+    inputs:
+      - stamp_and_verify
+    route:
+      cisco_asa:    '.source.type == "fw.cisco.asa"'
+      linux_auth:   '.source.type == "linux.auth"'
+      paloalto_cef: '.source.type == "fw.paloalto"'
+      qradar_leef:  '.source.type == "siem.qradar"'
+      nginx_access: '.source.type == "web.nginx.access"'
+      cloudtrail:   '.source.type == "cloud.aws.cloudtrail"'
+      k8s_audit:    '.source.type == "k8s.audit"'
+      iot_sensor:   '.source.type == "iot.sensor"'
+      postgres_db:  '.source.type == "db.postgres"'
+      windows_evtx: 'starts_with(string(.source.type) ?? "", "windows.")'

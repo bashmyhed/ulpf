@@ -1,0 +1,116 @@
+#!/bin/bash
+set -e
+
+echo "[pre-receive] Starting validation..."
+
+# Read stdin for ref updates
+while read oldrev newrev refname; do
+    echo "[pre-receive] Validating $refname: $oldrev -> $newrev"
+    
+    # Skip if this is a branch deletion
+    if [ "$newrev" = "0000000000000000000000000000000000000000" ]; then
+        echo "[pre-receive] Branch deletion, skipping validation"
+        continue
+    fi
+    
+    # Create temp worktree for validation
+    worktree=$(mktemp -d)
+    trap "rm -rf $worktree" EXIT
+    
+    # Checkout the new revision
+    git --work-tree="$worktree" --git-dir="/home/paul/projects/sih2/config-repo" checkout "$newrev" -- . 2>/dev/null
+    
+    VECTOR_BIN="/home/paul/.vector/bin/vector"
+    
+    # Set dummy env vars for validation
+    export KAFKA_BOOTSTRAP="kafka:9092"
+    export MINIO_ENDPOINT="http://minio:9000"
+    export MINIO_BUCKET="ulpf-data-lake"
+    export MINIO_ROOT_USER="minioadmin"
+    export MINIO_ROOT_PASSWORD="minioadmin"
+    export OPENSEARCH_ENDPOINT="http://opensearch:9200"
+    export VECTOR_LOG="info"
+    
+    # Python script for env var substitution (handles ${VAR:-default} syntax)
+    cat > /tmp/substitute_env.py << 'PYEOF'
+#!/usr/bin/env python3
+import os
+import re
+import sys
+
+def substitute(content):
+    # Pattern matches ${VAR:-default} or ${VAR}
+    pattern = re.compile(r'\$\{([A-Z_][A-Z0-9_]*)(:-([^}]*))?\}')
+    def repl(match):
+        var = match.group(1)
+        default = match.group(3) if match.group(3) is not None else ''
+        return os.environ.get(var, default)
+    return pattern.sub(repl, content)
+
+if __name__ == "__main__":
+    import sys
+    for filepath in sys.argv[1:]:
+        with open(filepath, 'r') as f:
+            content = f.read()
+        content = substitute(content)
+        with open(filepath, 'w') as f:
+            f.write(content)
+PYEOF
+    
+    # Vector validate requires --config-dir with the directory containing vector.yaml
+    # We'll validate each config by running validate on its parent directory
+    # For configs with env var interpolation, we need to substitute them first
+    echo "[pre-receive] Finding Vector configs..."
+    find "$worktree" -name "vector.yaml" -type f | while read cfg; do
+        # Skip machine-specific overrides (they're partial configs meant for merging)
+        if [[ "$cfg" == */machines/* ]] || [[ "$cfg" == */global/* ]]; then
+            echo "[pre-receive] Skipping base/override config: $cfg"
+            continue
+        fi
+        
+        cfg_dir=$(dirname "$cfg")
+        echo "[pre-receive] Validating $cfg"
+        
+        # Create a temp copy with env vars substituted for validation
+        validation_dir=$(mktemp -d)
+        # Copy only the vector.yaml and any non-transform files
+        cp "$cfg" "$validation_dir/vector.yaml"
+        # Copy any other yaml files that aren't in transforms/ (like sinks.yaml, sources.yaml)
+        for f in "$cfg_dir"/*.yaml; do
+            [ -f "$f" ] && cp "$f" "$validation_dir/"
+        done
+        
+        # Substitute env vars in all yaml files using Python
+        find "$validation_dir" -name "*.yaml" -type f | xargs python3 /tmp/substitute_env.py
+        
+        if ! "$VECTOR_BIN" validate --no-environment --config-dir "$validation_dir" 2>&1; then
+            echo "[pre-receive] FAILED: vector validate failed for $cfg"
+            rm -rf "$validation_dir"
+            exit 1
+        fi
+        rm -rf "$validation_dir"
+    done
+    
+    # If there's a test directory, run vector test
+    if [ -d "$worktree/tests" ]; then
+        echo "[pre-receive] Running vector test..."
+        if ! "$VECTOR_BIN" test --config-dir "$worktree" 2>&1; then
+            echo "[pre-receive] FAILED: vector test failed"
+            exit 1
+        fi
+    fi
+    
+    # Validate envelope compliance (basic check)
+    if [ -f "$worktree/validate_envelope.py" ]; then
+        echo "[pre-receive] Running envelope validation..."
+        if ! python3 "$worktree/validate_envelope.py" "$worktree" 2>&1; then
+            echo "[pre-receive] FAILED: envelope validation failed"
+            exit 1
+        fi
+    fi
+    
+    echo "[pre-receive] All validations passed for $refname"
+done
+
+echo "[pre-receive] Push accepted"
+exit 0

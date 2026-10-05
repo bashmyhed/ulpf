@@ -1,0 +1,43 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ULPF Collector A — Sources
+# ──────────────────────────────────────────────────────────────────────────────
+# Component  : collector-a
+# File       : config/sources.yaml
+# Log Sources: Cisco ASA Syslog, Linux auth.log, Palo Alto CEF, IBM QRadar LEEF
+# Description: File-based sources. Vector tails three log directories.
+#              The downstream transform (transform.yaml) classifies each line.
+#
+# Log directory layout on the collector host:
+#   /logs/syslog/  — Cisco ASA (%ASA-*) and Linux auth (RFC 3164/5424)
+#   /logs/cef/     — Palo Alto NGFW Common Event Format (CEF:0|...)
+#   /logs/raw/     — IBM QRadar LEEF (LEEF:1.0|... or LEEF:2.0|...)
+# ──────────────────────────────────────────────────────────────────────────────
+
+sources:
+
+  # Cisco ASA syslog + Linux auth syslog (RFC 3164 / RFC 5424)
+  syslog_files:
+    type: file
+    include:
+      - /logs/syslog/*.log
+    read_from: beginning
+    ignore_checkpoints: true
+    file_key: file_path
+
+  # Palo Alto Networks PAN-OS CEF (Common Event Format)
+  cef_files:
+    type: file
+    include:
+      - /logs/cef/*.log
+    read_from: beginning
+    ignore_checkpoints: true
+    file_key: file_path
+
+  # IBM QRadar LEEF (Log Event Extended Format)
+  leef_files:
+    type: file
+    include:
+      - /logs/raw/*.log
+    read_from: beginning
+    ignore_checkpoints: true
+    file_key: file_path

@@ -1,0 +1,21 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ULPF Central Parser — Sources
+# ──────────────────────────────────────────────────────────────────────────────
+# Component  : central-parser
+# File       : config/sources.yaml
+# Description: Kafka consumer source. Reads ULPF-enveloped raw log events from
+#              the shared topic published by all edge collectors.
+# Env vars   : KAFKA_BOOTSTRAP  — broker list (default: kafka:9092)
+# ──────────────────────────────────────────────────────────────────────────────
+
+sources:
+  kafka_in:
+    type: kafka
+    bootstrap_servers: "${KAFKA_BOOTSTRAP}"
+    group_id: "ulpf-central-parser"
+    topics:
+      - "ulpf-raw-logs"
+    decoding:
+      codec: json
+    auto_offset_reset: earliest
+    fetch_wait_max_ms: 100

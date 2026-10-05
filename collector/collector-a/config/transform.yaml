@@ -1,0 +1,169 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ULPF Collector A — Transform: Envelope Builder
+# ──────────────────────────────────────────────────────────────────────────────
+# Component  : collector-a
+# File       : config/transform.yaml
+# Description: Classifies each raw log line by inspecting its content prefix,
+#              computes SHA-256 integrity hash and raw byte length, then wraps
+#              the event in the ULPF Envelope schema (metadataGuide v1 Section 2).
+#
+# Classification rules (applied in priority order):
+#   1. CEF:      starts_with "CEF:"   → source.type = fw.paloalto
+#   2. LEEF:     starts_with "LEEF:"  → source.type = siem.qradar
+#   3. ASA:      starts_with "%ASA-"  → source.type = fw.cisco.asa
+#   4. Syslog:   matches /^[A-Z][a-z]{2}\s+\d/ (RFC 3164 timestamp)
+#                                     → source.type = linux.auth
+#   5. Fallback: anything else        → source.type = unknown.syslog
+#
+# Env vars consumed:
+#   SITE_ID        — data center / site identifier (default: kol-dc1)
+#   COLLECTOR_ID   — unique collector node name (default: collector-a)
+#   INSTANCE_ENV   — deployment environment label (default: test)
+# ──────────────────────────────────────────────────────────────────────────────
+
+transforms:
+  envelope_a:
+    type: remap
+    inputs:
+      - syslog_files
+      - cef_files
+      - leef_files
+    source: |
+      # ── 1. Validate payload ────────────────────────────────────────────────
+      raw_msg = string!(.message)
+      if length(raw_msg) == 0 { abort }
+
+      # ── 2. Compute raw metrics ─────────────────────────────────────────────
+      raw_sha256 = sha2(raw_msg)
+      raw_len    = length(raw_msg)
+      coll_time  = to_unix_timestamp(now(), unit: "milliseconds")
+      site_id    = get_env_var("SITE_ID") ?? "kol-dc1"
+      site_name  = "Site A"
+      agent_id   = get_env_var("AGENT_ID") ?? get_env_var("COLLECTOR_ID") ?? "agent-a"
+      fpath      = string(.file_path) ?? "/logs/syslog/unknown.log"
+
+      # ── 3. Classification conforming to metadataGuide Section 4 & 5 ────────
+      src_type   = "unknown.syslog"
+      vendor     = "Unknown"
+      product    = "Unknown"
+      raw_format = "plain"
+      extra_src  = {}
+
+      # CEF: Common Event Format (Palo Alto PAN-OS)
+      if starts_with(raw_msg, "CEF:") {
+        src_type   = "fw.paloalto"
+        vendor     = "PaloAlto"
+        product    = "PAN-OS"
+        raw_format = "cef"
+        extra_src  = {
+          "cef": {
+            "version": "0",
+            "device_vendor": "PaloAlto",
+            "device_product": "PAN-OS"
+          }
+        }
+      # LEEF: Log Event Extended Format (IBM QRadar)
+      } else if starts_with(raw_msg, "LEEF:") {
+        src_type   = "siem.qradar"
+        vendor     = "IBM"
+        product    = "QRadar"
+        raw_format = "leef"
+        extra_src  = {
+          "leef": {
+            "version": "1.0",
+            "delimiter": "\t"
+          }
+        }
+      # Cisco ASA syslog: %ASA-{sev}-{msg_id}:
+      } else if starts_with(raw_msg, "%ASA-") {
+        src_type   = "fw.cisco.asa"
+        vendor     = "Cisco"
+        product    = "ASA"
+        raw_format = "syslog3164"
+        extra_src  = {
+          "syslog": {
+            "rfc": "3164",
+            "facility": "local4",
+            "framing": "newline"
+          }
+        }
+      # Linux Auth / System Syslog: MMM DD HH:MM:SS host proc: msg
+      } else if match(raw_msg, r'^[A-Z][a-z]{2}\s+\d') {
+        src_type   = "linux.auth"
+        vendor     = "Linux"
+        product    = "OpenSSH"
+        raw_format = "syslog3164"
+        extra_src  = {
+          "os": "linux",
+          "syslog": {
+            "rfc": "3164",
+            "facility": "auth",
+            "framing": "newline"
+          }
+        }
+      }
+
+      # ── 4. Build ULPF Envelope (metadataGuide Section 2 & 3) ───────────────
+      . = {
+        "envelope_version": 1,
+        "site_id": site_id,
+        "site_name": site_name,
+        "agent_id": agent_id,
+        "collector_id": agent_id,
+        "agent_version": "1.0.0",
+        "collector_version": "1.0.0",
+        "seq": coll_time,
+        "collected_at": coll_time,
+        "source_tz": "+05:30",
+        "clock": {
+          "synced": true,
+          "skew_ms": 0
+        },
+        "source": {
+          "type": src_type,
+          "vendor": vendor,
+          "product": product,
+          "product_version": "unknown",
+          "transport": "file",
+          "host_name": get_hostname() ?? agent_id,
+          "host_ip": null,
+          "sender_ip": null,
+          "sender_port": null,
+          "host_id": null,
+          "position": {
+            "path": fpath,
+            "inode": null,
+            "offset": null,
+            "line_no": null
+          }
+        },
+        "raw_format": raw_format,
+        "raw_encoding": "utf-8",
+        "raw_len": raw_len,
+        "raw_sha256": raw_sha256,
+        "raw": raw_msg,
+        "flags": {
+          "truncated": false,
+          "multiline_joined": false,
+          "decoded_from": null,
+          "redacted": false,
+          "duplicate_suspect": false
+        },
+        "labels": {
+          "env": get_env_var("INSTANCE_ENV") ?? "test",
+          "site": "Site A",
+          "tier": "agent-a"
+        }
+      }
+
+      # Merge format-specific metadata into source
+      if is_object(extra_src.cef) {
+        .source.cef = extra_src.cef
+      } else if is_object(extra_src.leef) {
+        .source.leef = extra_src.leef
+      } else if is_object(extra_src.syslog) {
+        .source.syslog = extra_src.syslog
+        if is_string(extra_src.os) {
+          .source.os = extra_src.os
+        }
+      }

@@ -1,0 +1,42 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ULPF Collector A — Sinks
+# ──────────────────────────────────────────────────────────────────────────────
+# Component  : collector-a
+# File       : config/sinks.yaml
+# Description: Output destinations for enveloped log events.
+#
+# Sinks:
+#   1. kafka_out    — Primary: publishes ULPF-enveloped events to Kafka topic
+#                     "ulpf-raw-logs" consumed by the central parser.
+#   2. local_debug  — Secondary: writes a local NDJSON file for debugging.
+#                     Useful to inspect what is being sent before it hits Kafka.
+#
+# Env vars:
+#   KAFKA_BOOTSTRAP — Kafka broker list (default: kafka:9092)
+# ──────────────────────────────────────────────────────────────────────────────
+
+sinks:
+
+  # ── Primary: Kafka upstream to central parser ──────────────────────────────
+  kafka_out:
+    type: kafka
+    inputs:
+      - envelope_a
+    bootstrap_servers: "${KAFKA_BOOTSTRAP}"
+    topic: "ulpf-raw-logs"
+    encoding:
+      codec: json
+    buffer:
+      type: memory
+      max_events: 1000
+      when_full: block
+
+  # ── Debug: local NDJSON mirror ─────────────────────────────────────────────
+  # Written to the logs/debug volume for inspection without Kafka dependency.
+  local_debug:
+    type: file
+    inputs:
+      - envelope_a
+    path: /logs/debug/instance-a-sent.ndjson
+    encoding:
+      codec: json

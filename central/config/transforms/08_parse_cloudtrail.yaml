@@ -1,0 +1,98 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ULPF Central Parser — OCSF Parser: AWS CloudTrail (JSON)
+# ──────────────────────────────────────────────────────────────────────────────
+# Component  : central-parser
+# File       : config/transforms/08_parse_cloudtrail.yaml
+# Log Format : JSON — AWS CloudTrail management events
+#              Fields: eventSource, eventName, userIdentity, sourceIPAddress,
+#                      awsRegion, readOnly, errorCode, requestParameters
+# OCSF Class : API Activity (class_uid: 6003, category_uid: 6)
+# Source Type: cloud.aws.cloudtrail
+# Input      : route_source_type.cloudtrail
+# ──────────────────────────────────────────────────────────────────────────────
+
+transforms:
+  parse_cloudtrail:
+    type: remap
+    inputs:
+      - route_source_type.cloudtrail
+    source: |
+      raw_str  = to_string(.raw) ?? ""
+      parsed   = parse_json(raw_str) ?? {}
+      identity = object(parsed.userIdentity) ?? {}
+      un_raw   = to_string(identity.userName) ?? ""
+      idt_raw  = to_string(identity.type) ?? "unknown"
+      username = if un_raw != "" { un_raw } else { idt_raw }
+      src_ip   = string(parsed.sourceIPAddress) ?? ""
+      evt_src  = string(parsed.eventSource) ?? "aws"
+      evt_name = string(parsed.eventName) ?? "unknown"
+      region   = string(parsed.awsRegion) ?? "us-east-1"
+      err_code = string(parsed.errorCode) ?? ""
+      readonly = bool(parsed.readOnly) ?? false
+
+      act_id   = if readonly { 1 } else { 2 }
+      has_err  = err_code != ""
+      sev_id   = if has_err { 3 } else { 1 }
+      sev_name = if has_err { "Medium" } else { "Informational" }
+      st_name  = if has_err { "Failure" } else { "Success" }
+      st_id    = if has_err { 2 } else { 1 }
+
+      src_obj   = object(.source) ?? {}
+      event_id  = to_string(.event_id) ?? ""
+      coll_time = to_int(.collected_at) ?? 0
+      ing_time  = to_int(.ingested_at) ?? 0
+      integrity = object(.integrity) ?? {}
+
+      . = {
+        "class_uid":    6003,
+        "class_name":   "API Activity",
+        "category_uid": 6,
+        "activity_id":  act_id,
+        "severity_id":  sev_id,
+        "severity":     sev_name,
+        "status":       st_name,
+        "status_id":    st_id,
+        "time":         to_unix_timestamp(now()),
+        "@timestamp":   coll_time,
+        "message":      evt_name + " on " + evt_src + " by " + username,
+        "src_endpoint": { "ip": src_ip, "type_id": 1 },
+        "actor": { "user": { "name": username, "type": idt_raw } },
+        "api": {
+          "operation": evt_name,
+          "service":   { "name": evt_src }
+        },
+        "cloud": { "provider": "aws", "region": region },
+        "metadata": {
+          "uid":            event_id,
+          "version":        "1.3.0",
+          "product": {
+            "name":        to_string(src_obj.product) ?? "CloudTrail",
+            "vendor_name": to_string(src_obj.vendor) ?? "Amazon",
+            "version":     to_string(src_obj.product_version) ?? "unknown"
+          },
+          "log_provider":   "cloudtrail",
+          "log_name":       to_string(src_obj.type) ?? "cloud.aws.cloudtrail",
+          "event_code":     evt_name,
+          "logged_time":    coll_time,
+          "processed_time": ing_time,
+          "integrity":      integrity
+        },
+        "observables": [
+          { "name": "src_ip",   "type_id": 2, "value": src_ip },
+          { "name": "username", "type_id": 4, "value": username }
+        ],
+        "unmapped": {
+          "site":         to_string(.site_name) ?? (if to_string(.site_id) == "kol-dc1" { "Site A" } else if to_string(.site_id) == "del-dc2" { "Site B" } else if to_string(.site_id) == "mum-dc3" { "Site C" } else { "Site A" }),
+          "site_id":      to_string(.site_id) ?? "unknown",
+          "agent_id":     to_string(.agent_id) ?? to_string(.collector_id) ?? "unknown",
+          "collector_id": to_string(.agent_id) ?? to_string(.collector_id) ?? "unknown",
+          "raw_format":   "json",
+          "source_tz":    to_string(.source_tz) ?? "UTC",
+          "kafka": {
+            "topic":     to_string(.topic) ?? "",
+            "partition": to_int(.partition) ?? 0,
+            "offset":    to_int(.offset) ?? 0
+          },
+          "source_path": to_string(src_obj.position.path) ?? ""
+        }
+      }

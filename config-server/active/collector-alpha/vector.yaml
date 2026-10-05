@@ -1,0 +1,12 @@
+
+sources:
+  sample_in:
+    type: demo_logs
+    format: syslog
+    interval: 1.0
+
+sinks:
+  sample_out:
+    type: blackhole
+    inputs:
+      - sample_in

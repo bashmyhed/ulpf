@@ -1,0 +1,216 @@
+# Vector Collector — Instance A
+# Conforms to ULPF Collector Metadata Guide (v1)
+# Sources: Cisco ASA syslog, Linux auth.log, Palo Alto CEF, IBM QRadar LEEF
+
+api:
+  enabled: true
+  address: "0.0.0.0:8686"
+  playground: false
+
+sources:
+  host_sys:
+    type: host_metrics
+    scrape_interval_secs: 15
+
+  internal_metrics:
+    type: internal_metrics
+
+  syslog_files:
+    type: file
+    include:
+      - /logs/syslog/*.log
+    read_from: beginning
+    ignore_checkpoints: true
+    file_key: file_path
+
+  cef_files:
+    type: file
+    include:
+      - /logs/cef/*.log
+    read_from: beginning
+    ignore_checkpoints: true
+    file_key: file_path
+
+  leef_files:
+    type: file
+    include:
+      - /logs/raw/*.log
+    read_from: beginning
+    ignore_checkpoints: true
+    file_key: file_path
+
+transforms:
+  envelope_a:
+    type: remap
+    inputs:
+      - syslog_files
+      - cef_files
+      - leef_files
+    source: |
+      # ── 1. Validate payload ────────────────────────────────────────────────
+      raw_msg = string!(.message)
+      if length(raw_msg) == 0 { abort }
+
+      # ── 2. Compute raw metrics ─────────────────────────────────────────────
+      raw_sha256 = sha2(raw_msg)
+      raw_len    = length(raw_msg)
+      coll_time  = to_unix_timestamp(now(), unit: "milliseconds")
+      site_id    = get_env_var("SITE_ID") ?? "kol-dc1"
+      site_name  = "Site A"
+      agent_id   = get_env_var("AGENT_ID") ?? get_env_var("COLLECTOR_ID") ?? "agent-a"
+      fpath      = string(.file_path) ?? "/logs/syslog/unknown.log"
+
+      # ── 3. Classification conforming to metadataGuide Section 4 & 5 ────────
+      src_type   = "unknown.syslog"
+      vendor     = "Unknown"
+      product    = "Unknown"
+      raw_format = "plain"
+      extra_src  = {}
+
+      # CEF: Common Event Format
+      if starts_with(raw_msg, "CEF:") {
+        src_type   = "fw.paloalto"
+        vendor     = "PaloAlto"
+        product    = "PAN-OS"
+        raw_format = "cef"
+        extra_src  = {
+          "cef": {
+            "version": "0",
+            "device_vendor": "PaloAlto",
+            "device_product": "PAN-OS"
+          }
+        }
+      # LEEF: Log Event Extended Format
+      } else if starts_with(raw_msg, "LEEF:") {
+        src_type   = "siem.qradar"
+        vendor     = "IBM"
+        product    = "QRadar"
+        raw_format = "leef"
+        extra_src  = {
+          "leef": {
+            "version": "1.0",
+            "delimiter": "\t"
+          }
+        }
+      # Cisco ASA: %ASA-{sev}-{msg_id}
+      } else if starts_with(raw_msg, "%ASA-") {
+        src_type   = "fw.cisco.asa"
+        vendor     = "Cisco"
+        product    = "ASA"
+        raw_format = "syslog3164"
+        extra_src  = {
+          "syslog": {
+            "rfc": "3164",
+            "facility": "local4",
+            "framing": "newline"
+          }
+        }
+      # Linux Auth / System Syslog: MMM DD HH:MM:SS host proc: msg
+      } else if match(raw_msg, r'^[A-Z][a-z]{2}\s+\d') {
+        src_type   = "linux.auth"
+        vendor     = "Linux"
+        product    = "OpenSSH"
+        raw_format = "syslog3164"
+        extra_src  = {
+          "os": "linux",
+          "syslog": {
+            "rfc": "3164",
+            "facility": "auth",
+            "framing": "newline"
+          }
+        }
+      }
+
+      # ── 4. Build ULPF Envelope (metadataGuide Section 2 & 3) ───────────────
+      . = {
+        "envelope_version": 1,
+        "site_id": site_id,
+        "site_name": site_name,
+        "agent_id": agent_id,
+        "collector_id": agent_id,
+        "agent_version": "1.0.0",
+        "collector_version": "1.0.0",
+        "seq": coll_time,
+        "collected_at": coll_time,
+        "source_tz": "+05:30",
+        "clock": {
+          "synced": true,
+          "skew_ms": 0
+        },
+        "source": {
+          "type": src_type,
+          "vendor": vendor,
+          "product": product,
+          "product_version": "unknown",
+          "transport": "file",
+          "host_name": get_hostname() ?? agent_id,
+          "host_ip": null,
+          "sender_ip": null,
+          "sender_port": null,
+          "host_id": null,
+          "position": {
+            "path": fpath,
+            "inode": null,
+            "offset": null,
+            "line_no": null
+          }
+        },
+        "raw_format": raw_format,
+        "raw_encoding": "utf-8",
+        "raw_len": raw_len,
+        "raw_sha256": raw_sha256,
+        "raw": raw_msg,
+        "flags": {
+          "truncated": false,
+          "multiline_joined": false,
+          "decoded_from": null,
+          "redacted": false,
+          "duplicate_suspect": false
+        },
+        "labels": {
+          "env": get_env_var("INSTANCE_ENV") ?? "prod",
+          "site": "Site A",
+          "tier": "agent-a"
+        }
+      }
+
+      # Merge any source-specific metadata into source
+      if is_object(extra_src.cef) {
+        .source.cef = extra_src.cef
+      } else if is_object(extra_src.leef) {
+        .source.leef = extra_src.leef
+      } else if is_object(extra_src.syslog) {
+        .source.syslog = extra_src.syslog
+        if is_string(extra_src.os) {
+          .source.os = extra_src.os
+        }
+      }
+
+sinks:
+  kafka_out:
+    type: kafka
+    inputs:
+      - envelope_a
+    bootstrap_servers: "${KAFKA_BOOTSTRAP}"
+    topic: "ulpf-raw-logs"
+    encoding:
+      codec: json
+    buffer:
+      type: memory
+      max_events: 1000
+      when_full: block
+
+  local_debug:
+    type: file
+    inputs:
+      - envelope_a
+    path: /logs/debug/instance-a-sent.ndjson
+    encoding:
+      codec: json
+
+  prometheus_metrics:
+    type: prometheus_exporter
+    inputs:
+      - host_sys
+      - internal_metrics
+    address: "0.0.0.0:9598"

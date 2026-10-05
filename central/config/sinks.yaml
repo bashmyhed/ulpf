@@ -1,0 +1,157 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ULPF Central Parser — Sinks
+# ──────────────────────────────────────────────────────────────────────────────
+# Component  : central-parser
+# File       : config/sinks.yaml
+# Description: All output destinations for the central parser pipeline.
+#
+# Sinks:
+#   1. minio_raw_lake      — MinIO S3-compatible raw data lake (compressed)
+#                            Path: raw-preservation/site=.../source_type=.../date=.../
+#   2. local_raw_lake      — Local file mirror of raw preservation (plaintext)
+#                            Path: /output/raw-lake/preservation-events.ndjson
+#   3. ocsf_all            — Local OCSF-normalized event file (all parsers merged)
+#                            Path: /output/ocsf-events.ndjson
+#   4. console_out         — Live JSON console output (debug / development)
+#   5. opensearch_sink     — OpenSearch / Elasticsearch SIEM index
+#                            Index: ulpf-ocsf-YYYY.MM.DD
+#
+# Env vars:
+#   MINIO_ENDPOINT         — MinIO host (default: http://minio:9000)
+#   MINIO_BUCKET           — Bucket name (default: ulpf-data-lake)
+#   MINIO_ROOT_USER        — Access key (default: minioadmin)
+#   MINIO_ROOT_PASSWORD    — Secret key (default: minioadmin)
+#   OPENSEARCH_ENDPOINT    — OpenSearch URL (default: http://opensearch:9200)
+# ──────────────────────────────────────────────────────────────────────────────
+
+sinks:
+
+  # ── 1. MinIO Raw Data Lake ─────────────────────────────────────────────────
+  # Full envelope + raw log body, gzip compressed, partitioned by site and date.
+  # This is the forensic preservation layer — raw data is never altered.
+  minio_raw_lake:
+    type: aws_s3
+    inputs:
+      - stamp_and_verify
+    bucket: "${MINIO_BUCKET:-ulpf-data-lake}"
+    endpoint: "${MINIO_ENDPOINT:-http://minio:9000}"
+    region: "us-east-1"
+    key_prefix: "raw-preservation/site={{ site_id }}/source_type={{ source.type }}/date=%Y-%m-%d/"
+    filename_extension: "ndjson.gz"
+    auth:
+      access_key_id: "${MINIO_ROOT_USER:-minioadmin}"
+      secret_access_key: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+    encoding:
+      codec: json
+    compression: gzip
+    batch:
+      timeout_secs: 5
+    buffer:
+      type: memory
+      max_events: 500
+      when_full: block
+
+  # ── 2. Local Raw Lake Mirror ───────────────────────────────────────────────
+  # Uncompressed file sink for easy local inspection during development/testing.
+  local_raw_lake:
+    type: file
+    inputs:
+      - stamp_and_verify
+    path: "/output/raw-lake/preservation-events.ndjson"
+    encoding:
+      codec: json
+
+  # ── 3. OCSF Normalized Event Stream ───────────────────────────────────────
+  # Slim OCSF events (no raw log bodies). One line per normalized event.
+  ocsf_all:
+    type: file
+    inputs:
+      - parse_cisco_asa
+      - parse_linux_auth
+      - parse_paloalto_cef
+      - parse_qradar_leef
+      - parse_nginx_access
+      - parse_cloudtrail
+      - parse_k8s_audit
+      - parse_iot_sensor
+      - parse_postgres_db
+      - parse_windows_evtx
+      - parse_unknown
+    path: "/output/ocsf-events.ndjson"
+    encoding:
+      codec: json
+
+  # ── 4. ML Event Feed ──────────────────────────────────────────────────────
+  # The worker consumes this additive copy; the raw lake, local OCSF file and
+  # OpenSearch SIEM sink remain independent delivery paths.
+  ml_ocsf_kafka:
+    type: kafka
+    inputs:
+      - parse_cisco_asa
+      - parse_linux_auth
+      - parse_paloalto_cef
+      - parse_qradar_leef
+      - parse_nginx_access
+      - parse_cloudtrail
+      - parse_k8s_audit
+      - parse_iot_sensor
+      - parse_postgres_db
+      - parse_windows_evtx
+      - parse_unknown
+    bootstrap_servers: "${KAFKA_BOOTSTRAP}"
+    topic: "ulpf-ocsf-events"
+    encoding:
+      codec: json
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: block
+
+  # ── 5. Console Output (debug) ──────────────────────────────────────────────
+  # Live JSON stream to stdout. Useful during local development.
+  # Disable in production by removing or commenting out this sink.
+  console_out:
+    type: console
+    inputs:
+      - parse_cisco_asa
+      - parse_linux_auth
+      - parse_paloalto_cef
+      - parse_qradar_leef
+      - parse_nginx_access
+      - parse_cloudtrail
+      - parse_k8s_audit
+      - parse_iot_sensor
+      - parse_postgres_db
+      - parse_windows_evtx
+      - parse_unknown
+    encoding:
+      codec: json
+
+  # ── 6. OpenSearch SIEM Analytics ──────────────────────────────────────────
+  # Bulk-indexed into daily rolling OCSF index for dashboards and alerting.
+  opensearch_sink:
+    type: elasticsearch
+    inputs:
+      - parse_cisco_asa
+      - parse_linux_auth
+      - parse_paloalto_cef
+      - parse_qradar_leef
+      - parse_nginx_access
+      - parse_cloudtrail
+      - parse_k8s_audit
+      - parse_iot_sensor
+      - parse_postgres_db
+      - parse_windows_evtx
+      - parse_unknown
+    endpoints:
+      - "${OPENSEARCH_ENDPOINT:-http://opensearch:9200}"
+    api_version: "v8"
+    mode: "bulk"
+    bulk:
+      index: "ulpf-ocsf-%Y.%m.%d"
+    healthcheck:
+      enabled: false
+    buffer:
+      type: memory
+      max_events: 500
+      when_full: block

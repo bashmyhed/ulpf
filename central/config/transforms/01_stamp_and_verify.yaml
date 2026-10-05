@@ -1,0 +1,43 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ULPF Central Parser — Transform: Validation & Stamping
+# ──────────────────────────────────────────────────────────────────────────────
+# Component  : central-parser
+# File       : config/transforms/01_stamp_and_verify.yaml
+# Description: Step 1. Receives raw enveloped events from Kafka.
+#              - Verifies SHA-256 hash and raw_len integrity
+#              - Generates a ULID-style event_id (timestamp + random suffix)
+#              - Stamps ingested_at (central processing time)
+#              - Attaches integrity block: { algorithm, hash, verified }
+# Input      : kafka_in
+# Output     : stamp_and_verify  →  consumed by 02_route.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+
+transforms:
+  stamp_and_verify:
+    type: remap
+    inputs:
+      - kafka_in
+    source: |
+      raw_msg   = string!(.raw)
+      raw_hash  = string(.raw_sha256) ?? ""
+      coll_time = to_int(.collected_at) ?? to_unix_timestamp(now(), unit: "milliseconds")
+
+      computed_hash = sha2(raw_msg)
+      hash_ok       = (computed_hash == raw_hash)
+
+      actual_len   = length(raw_msg)
+      declared_len = to_int(.raw_len) ?? actual_len
+      len_ok       = (actual_len == declared_len)
+
+      ts_hex   = upcase(string!(format_int!(coll_time, 16)))
+      rnd_hex  = upcase(slice!(replace(uuid_v4(), "-", ""), 0, 10))
+      event_id = "01" + ts_hex + rnd_hex
+
+      .event_id    = event_id
+      .ingested_at = to_unix_timestamp(now(), unit: "milliseconds")
+
+      .integrity = {
+        "algorithm": "sha256",
+        "hash":      raw_hash,
+        "verified":  hash_ok && len_ok
+      }
